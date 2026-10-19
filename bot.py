@@ -22,7 +22,7 @@ from telegram.ext import (
     filters,
 )
 
-# ================= CONFIG =================
+# =============== CONFIG ===============
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
@@ -30,13 +30,6 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 START_IMAGE = "https://files.catbox.moe/vg3vae.jpg"
 OWNER_USERNAME = "@SumitTripathi"
-
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-
-logger = logging.getLogger(__name__)
 
 PROMO_STATE = "promo_state"
 
@@ -47,8 +40,15 @@ DURATIONS = {
     "permanent": ("Permanent", None),
 }
 
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 
-# ================= DATABASE =================
+logger = logging.getLogger(__name__)
+
+
+# =============== DATABASE ===============
 
 async def get_pool(application):
     return application.bot_data["db"]
@@ -95,20 +95,17 @@ async def init_db(application):
             )
         """)
 
-    logger.info("Database initialized")
+    logger.info("Database initialized successfully")
 
 
 async def close_db(application):
     pool = application.bot_data.get("db")
+
     if pool:
         await pool.close()
 
 
-# ================= AUTH =================
-
-async def is_owner(user_id):
-    return user_id == OWNER_ID
-
+# =============== AUTHORIZATION ===============
 
 async def is_authorized(application, user_id):
     if user_id == OWNER_ID:
@@ -154,7 +151,7 @@ async def authorized_only(update, context):
     return True
 
 
-# ================= START / HELP =================
+# =============== START ===============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = (
@@ -183,10 +180,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+# =============== HELP ===============
+
+async def help_command(update, context):
     user_id = update.effective_user.id
 
     text = (
@@ -220,7 +216,7 @@ async def help_command(
     )
 
 
-# ================= ADMIN MANAGEMENT =================
+# =============== ADMIN MANAGEMENT ===============
 
 async def auth_admin(update, context):
     if not await owner_only(update):
@@ -266,7 +262,7 @@ async def auth_admin(update, context):
         )
 
     await update.effective_message.reply_text(
-        f"✅ User {user_id} is now an authorized promo admin."
+        f"✅ User {user_id} is now authorized."
     )
 
 
@@ -290,7 +286,7 @@ async def unauth_admin(update, context):
 
     if user_id == OWNER_ID:
         await update.effective_message.reply_text(
-            "❌ The owner cannot be removed."
+            "❌ You cannot remove the owner."
         )
         return
 
@@ -304,7 +300,7 @@ async def unauth_admin(update, context):
 
     if result == "DELETE 0":
         await update.effective_message.reply_text(
-            "ℹ️ This user was not an authorized admin."
+            "ℹ️ User was not in the authorized list."
         )
     else:
         await update.effective_message.reply_text(
@@ -340,7 +336,7 @@ async def list_admins(update, context):
     )
 
 
-# ================= DESTINATIONS =================
+# =============== DESTINATIONS ===============
 
 async def check_bot_permissions(bot, chat_id):
     try:
@@ -360,7 +356,11 @@ async def check_bot_permissions(bot, chat_id):
         return bool(getattr(member, "can_delete_messages", False))
 
     except TelegramError as exc:
-        logger.warning("Permission check failed for %s: %s", chat_id, exc)
+        logger.warning(
+            "Permission check failed for %s: %s",
+            chat_id,
+            exc,
+        )
         return False
 
 
@@ -370,7 +370,7 @@ async def connect_destination(update, context):
 
     if not context.args:
         await update.effective_message.reply_text(
-            "Usage: /connect CHAT_ID\n\n"
+            "Usage: /connect CHAT_ID\n"
             "Example: /connect -1001234567890"
         )
         return
@@ -394,7 +394,7 @@ async def connect_destination(update, context):
 
         if not await check_bot_permissions(context.bot, chat_id):
             await update.effective_message.reply_text(
-                "❌ Bot ko admin banao aur required permissions do.\n\n"
+                "❌ Bot permissions incomplete.\n\n"
                 "Channel: Post Messages + Delete Messages\n"
                 "Group: Delete Messages"
             )
@@ -417,7 +417,7 @@ async def connect_destination(update, context):
             )
 
         await update.effective_message.reply_text(
-            f"✅ Destination connected!\n\n"
+            f"✅ Destination connected!\n"
             f"Name: {escape(chat.title or str(chat_id))}\n"
             f"ID: <code>{chat_id}</code>",
             parse_mode="HTML",
@@ -427,7 +427,7 @@ async def connect_destination(update, context):
         logger.warning("Connect failed: %s", exc)
 
         await update.effective_message.reply_text(
-            "❌ Chat access nahi mila. Chat ID aur bot permissions check karo."
+            "❌ Could not access this chat. Check the ID and bot permissions."
         )
 
 
@@ -502,7 +502,7 @@ async def disconnect_destination(update, context):
         )
 
 
-# ================= PROMO FLOW =================
+# =============== PROMO FLOW ===============
 
 async def promo(update, context):
     if not await authorized_only(update, context):
@@ -515,7 +515,7 @@ async def promo(update, context):
     await update.effective_message.reply_text(
         "📢 <b>Send your promo message now.</b>\n\n"
         "Text, photo, video and forwarded messages are supported.\n"
-        "Forwarded messages will retain their attribution when Telegram allows it.\n\n"
+        "Forward attribution will be preserved when Telegram permits it.\n\n"
         "Send /cancel to cancel.",
         parse_mode="HTML",
     )
@@ -551,7 +551,6 @@ async def receive_promo(update, context):
         context.user_data.pop(PROMO_STATE, None)
         return
 
-    # Ignore commands.
     if message.text and message.text.startswith("/"):
         return
 
@@ -572,10 +571,16 @@ async def receive_promo(update, context):
         ],
         [
             InlineKeyboardButton("72 Hours", callback_data="duration:72"),
-            InlineKeyboardButton("Permanent", callback_data="duration:permanent"),
+            InlineKeyboardButton(
+                "Permanent",
+                callback_data="duration:permanent",
+            ),
         ],
         [
-            InlineKeyboardButton("❌ Cancel", callback_data="duration:cancel"),
+            InlineKeyboardButton(
+                "❌ Cancel",
+                callback_data="duration:cancel",
+            ),
         ],
     ]
 
@@ -641,4 +646,247 @@ async def choose_duration(update, context):
         return
 
     await query.edit_message_text(
-        f"⏳
+        f"⏳ Publishing promo...\n"
+        f"Duration: {duration_name}\n"
+        f"Destinations: {len(destinations)}"
+    )
+
+    source_chat_id = state["source_chat_id"]
+    source_message_id = state["source_message_id"]
+
+    success = 0
+    failed = []
+
+    for destination in destinations:
+        chat_id = destination["chat_id"]
+        title = destination["title"]
+
+        try:
+            if not await check_bot_permissions(context.bot, chat_id):
+                failed.append(f"{title}: missing permissions")
+                continue
+
+            forwarded = await context.bot.forward_message(
+                chat_id=chat_id,
+                from_chat_id=source_chat_id,
+                message_id=source_message_id,
+            )
+
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO zx_promo_messages
+                        (
+                            source_user_id,
+                            destination_chat_id,
+                            destination_message_id,
+                            expires_at,
+                            status
+                        )
+                    VALUES ($1, $2, $3, $4, 'active')
+                    ON CONFLICT (destination_chat_id, destination_message_id)
+                    DO NOTHING
+                    """,
+                    user_id,
+                    chat_id,
+                    forwarded.message_id,
+                    expires_at,
+                )
+
+            success += 1
+
+        except (TelegramError, asyncpg.PostgresError) as exc:
+            logger.warning(
+                "Forward failed for %s: %s",
+                chat_id,
+                exc,
+            )
+            failed.append(f"{title}: {str(exc)[:100]}")
+
+        await asyncio.sleep(0.1)
+
+    context.user_data.pop(PROMO_STATE, None)
+
+    report = (
+        "📢 <b>PROMO REPORT</b>\n\n"
+        f"✅ Published: {success}\n"
+        f"❌ Failed: {len(failed)}\n"
+        f"⏳ Duration: {duration_name}\n"
+    )
+
+    if expires_at:
+        report += (
+            "🗓 Expires: "
+            f"{expires_at.strftime('%d-%m-%Y %H:%M UTC')}\n"
+        )
+    else:
+        report += "♾ Auto-delete: Off\n"
+
+    if failed:
+        report += "\n<b>Failed destinations:</b>\n"
+
+        for item in failed[:15]:
+            report += f"• {escape(item)}\n"
+
+        if len(failed) > 15:
+            report += f"• ...and {len(failed) - 15} more\n"
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=report,
+            parse_mode="HTML",
+        )
+    except TelegramError as exc:
+        logger.warning("Could not send report: %s", exc)
+
+
+# =============== AUTO DELETE ===============
+
+async def delete_expired_promos(context):
+    pool = await get_pool(context.application)
+    now = datetime.now(timezone.utc)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, destination_chat_id, destination_message_id
+            FROM zx_promo_messages
+            WHERE status = 'active'
+              AND expires_at IS NOT NULL
+              AND expires_at <= $1
+            ORDER BY expires_at
+            LIMIT 100
+            """,
+            now,
+        )
+
+    for row in rows:
+        promo_id = row["id"]
+        chat_id = row["destination_chat_id"]
+        message_id = row["destination_message_id"]
+
+        try:
+            await context.bot.delete_message(
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            status = "deleted"
+
+        except BadRequest as exc:
+            error = str(exc).lower()
+
+            if "message to delete not found" in error:
+                status = "deleted"
+            else:
+                logger.warning(
+                    "Could not delete promo %s: %s",
+                    promo_id,
+                    exc,
+                )
+                status = "active"
+
+        except (Forbidden, TelegramError) as exc:
+            logger.warning(
+                "Deletion failed for promo %s: %s",
+                promo_id,
+                exc,
+            )
+            status = "active"
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE zx_promo_messages
+                SET status = $1
+                WHERE id = $2
+                """,
+                status,
+                promo_id,
+            )
+
+        await asyncio.sleep(0.1)
+
+
+# =============== ERROR HANDLER ===============
+
+async def error_handler(update, context):
+    logger.error(
+        "Unhandled bot error",
+        exc_info=context.error,
+    )
+
+
+# =============== STARTUP ===============
+
+async def post_init(application):
+    await init_db(application)
+
+    application.job_queue.run_repeating(
+        delete_expired_promos,
+        interval=60,
+        first=10,
+        name="delete_expired_promos",
+    )
+
+
+async def post_shutdown(application):
+    await close_db(application)
+
+
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is missing.")
+
+    if not OWNER_ID:
+        raise RuntimeError("OWNER_ID is missing.")
+
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is missing.")
+
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("promo", promo))
+    application.add_handler(CommandHandler("cancel", cancel_promo))
+
+    application.add_handler(CommandHandler("auth", auth_admin))
+    application.add_handler(CommandHandler("unauth", unauth_admin))
+    application.add_handler(CommandHandler("admins", list_admins))
+    application.add_handler(CommandHandler("connect", connect_destination))
+    application.add_handler(CommandHandler("destinations", list_destinations))
+    application.add_handler(CommandHandler("disconnect", disconnect_destination))
+
+    application.add_handler(
+        CallbackQueryHandler(
+            choose_duration,
+            pattern=r"^duration:",
+        )
+    )
+
+    application.add_handler(
+        MessageHandler(
+            filters.ALL & ~filters.COMMAND,
+            receive_promo,
+        )
+    )
+
+    application.add_error_handler(error_handler)
+
+    logger.info("Promo Manager Bot starting...")
+
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=False,
+    )
+
+
+if __name__ == "__main__":
+    main()
