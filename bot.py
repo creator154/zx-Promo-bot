@@ -142,7 +142,7 @@ async def authorized_only(update, context):
     return True
 
 
-=============== START / HELP ===============
+# =============== START / HELP ===============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 caption = (
@@ -202,7 +202,7 @@ await update.effective_message.reply_text(
     parse_mode="HTML",
 )
 
-=============== ADMIN COMMANDS ===============
+# =============== ADMIN COMMANDS ===============
 async def auth_admin(update, context):
     if not await owner_only(update):
         return
