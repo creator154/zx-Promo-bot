@@ -202,7 +202,7 @@ await update.effective_message.reply_text(
     parse_mode="HTML",
 )
 
-# =============== ADMIN COMMANDS ===============
+=============== ADMIN COMMANDS ===============
 async def auth_admin(update, context):
     if not await owner_only(update):
         return
