@@ -142,58 +142,67 @@ async def authorized_only(update, context):
     return True
 
 
-# =============== START / HELP ===============
+=============== START / HELP ===============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    caption = (
-        "🚀 <b>PROMO MANAGER</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "📢 Promote Everywhere. Reach More.\n\n"
-        "⚡ Fast • Reliable • Automated\n\n"
-        "📚 Type /help for commands\n\n"
-        "👑 <b>Powered by @SumitTripathi</b>"
-    )
+caption = (
+"<b>🚀 PROMO MANAGER</b>\n\n"
+"<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
+"<b>• Promote Everywhere. Reach More.</b>\n\n"
+"<b>• Fast • Reliable • Automated</b>\n\n"
+"<b>• Type /help for commands</b>\n\n"
+"<b>• Powered by @SumitTripathi</b>\n\n"
+"<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>"
+)
 
-    try:
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=START_IMAGE,
-            caption=caption,
-            parse_mode="HTML",
-        )
-    except TelegramError:
-        await update.effective_message.reply_text(
-            caption,
-            parse_mode="HTML",
-        )
-
-
-async def help_command(update, context):
-    text = (
-        "📚 <b>PROMO MANAGER</b>\n\n"
-        "/promo — Start a promotion\n"
-        "/cancel — Cancel current promotion\n"
-    )
-
-    if update.effective_user.id == OWNER_ID:
-        text += (
-            "\n👑 <b>OWNER COMMANDS</b>\n"
-            "/auth USER_ID\n"
-            "/unauth USER_ID\n"
-            "/admins\n"
-            "/connect CHAT_ID\n"
-            "/destinations\n"
-            "/disconnect CHAT_ID\n"
-        )
-
-    await update.effective_message.reply_text(
-        text,
+try:
+    await context.bot.send_photo(
+        chat_id=update.effective_chat.id,
+        photo=START_IMAGE,
+        caption=caption,
         parse_mode="HTML",
     )
 
+except TelegramError as exc:
+    logger.warning("Start image failed: %s", exc)
 
-# =============== ADMIN COMMANDS ===============
+    await update.effective_message.reply_text(
+        caption,
+        parse_mode="HTML",
+    )
 
+async def help_command(update, context):
+text = (
+"<b>🚀 PROMO MANAGER — HELP</b>\n\n"
+"<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
+"<b>📢 PROMO COMMANDS</b>\n"
+"<b>/promo</b> — Start a promotion\n"
+"<b>/cancel</b> — Cancel current promotion\n"
+)
+
+if update.effective_user.id == OWNER_ID:
+    text += (
+        "\n<b>👑 OWNER COMMANDS</b>\n"
+        "<b>/auth USER_ID</b> — Authorize admin\n"
+        "<b>/unauth USER_ID</b> — Remove admin\n"
+        "<b>/admins</b> — View authorized admins\n\n"
+        "<b>📡 DESTINATION COMMANDS</b>\n"
+        "<b>/connect CHAT_ID</b> — Connect group/channel\n"
+        "<b>/destinations</b> — View connected destinations\n"
+        "<b>/disconnect CHAT_ID</b> — Remove destination\n"
+    )
+
+text += (
+    "\n<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
+    "<b>👑 Powered by @SumitTripathi</b>"
+)
+
+await update.effective_message.reply_text(
+    text,
+    parse_mode="HTML",
+)
+
+=============== ADMIN COMMANDS ===============
 async def auth_admin(update, context):
     if not await owner_only(update):
         return
