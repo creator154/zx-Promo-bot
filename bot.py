@@ -169,36 +169,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
         )
 
-async def help_command(update, context):
-text = (
-"<b>🚀 PROMO MANAGER — HELP</b>\n\n"
-"<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
-"<b>📢 PROMO COMMANDS</b>\n"
-"<b>/promo</b> — Start a promotion\n"
-"<b>/cancel</b> — Cancel current promotion\n"
-)
-
-if update.effective_user.id == OWNER_ID:
-    text += (
-        "\n<b>👑 OWNER COMMANDS</b>\n"
-        "<b>/auth USER_ID</b> — Authorize admin\n"
-        "<b>/unauth USER_ID</b> — Remove admin\n"
-        "<b>/admins</b> — View authorized admins\n\n"
-        "<b>📡 DESTINATION COMMANDS</b>\n"
-        "<b>/connect CHAT_ID</b> — Connect group/channel\n"
-        "<b>/destinations</b> — View connected destinations\n"
-        "<b>/disconnect CHAT_ID</b> — Remove destination\n"
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "<b>🚀 PROMO MANAGER — HELP</b>\n\n"
+        "<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
+        "<b>📢 PROMO COMMANDS</b>\n"
+        "<b>/promo</b> — Start a promotion\n"
+        "<b>/cancel</b> — Cancel current promotion\n"
     )
 
-text += (
-    "\n<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
-    "<b>👑 Powered by @SumitTripathi</b>"
-)
+    if update.effective_user.id == OWNER_ID:
+        text += (
+            "\n<b>👑 OWNER COMMANDS</b>\n"
+            "<b>/auth USER_ID</b> — Authorize admin\n"
+            "<b>/unauth USER_ID</b> — Remove admin\n"
+            "<b>/admins</b> — View authorized admins\n\n"
+            "<b>📡 DESTINATION COMMANDS</b>\n"
+            "<b>/connect CHAT_ID</b> — Connect group/channel\n"
+            "<b>/destinations</b> — View connected destinations\n"
+            "<b>/disconnect CHAT_ID</b> — Remove destination\n"
+        )
 
-await update.effective_message.reply_text(
-    text,
-    parse_mode="HTML",
-)
+    text += (
+        "\n<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
+        "<b>👑 Powered by @SumitTripathi</b>"
+    )
+
+    await update.effective_message.reply_text(
+        text,
+        parse_mode="HTML",
+    )
 
 =============== ADMIN COMMANDS ===============
 async def auth_admin(update, context):
