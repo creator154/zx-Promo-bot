@@ -1,2 +1,2 @@
-pyTelegramBotAPI
-requests
+python-telegram-bot[job-queue]==21.10
+asyncpg==0.30.0
