@@ -145,31 +145,29 @@ async def authorized_only(update, context):
 # =============== START / HELP ===============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-caption = (
-"<b>🚀 PROMO MANAGER</b>\n\n"
-"<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
-"<b>• Promote Everywhere. Reach More.</b>\n\n"
-"<b>• Fast • Reliable • Automated</b>\n\n"
-"<b>• Type /help for commands</b>\n\n"
-"<b>• Powered by @SumitTripathi</b>\n\n"
-"<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>"
-)
-
-try:
-    await context.bot.send_photo(
-        chat_id=update.effective_chat.id,
-        photo=START_IMAGE,
-        caption=caption,
-        parse_mode="HTML",
+    caption = (
+        "<b>🚀 PROMO MANAGER</b>\n\n"
+        "<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
+        "<b>• Promote Everywhere. Reach More.</b>\n\n"
+        "<b>• Fast • Reliable • Automated</b>\n\n"
+        "<b>• Type /help for commands</b>\n\n"
+        "<b>• Powered by @SumitTripathi</b>\n\n"
+        "<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>"
     )
 
-except TelegramError as exc:
-    logger.warning("Start image failed: %s", exc)
-
-    await update.effective_message.reply_text(
-        caption,
-        parse_mode="HTML",
-    )
+    try:
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=START_IMAGE,
+            caption=caption,
+            parse_mode="HTML",
+        )
+    except TelegramError as exc:
+        logger.warning("Start image failed: %s", exc)
+        await update.effective_message.reply_text(
+            caption,
+            parse_mode="HTML",
+        )
 
 async def help_command(update, context):
 text = (
