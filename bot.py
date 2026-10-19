@@ -200,7 +200,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
-=============== ADMIN COMMANDS ===============
+# =============== ADMIN COMMANDS ===============
 async def auth_admin(update, context):
     if not await owner_only(update):
         return
