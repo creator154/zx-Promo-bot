@@ -1,4 +1,3 @@
-
 import os
 import asyncio
 import logging
@@ -12,62 +11,66 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
-from telegram.constants import ChatMemberStatus
-from telegram.error import TelegramError, BadRequest
+from telegram.constants import ParseMode
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    ChatMemberHandler,
     ContextTypes,
     filters,
 )
 
-# =============== CONFIG ===============
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# ================= CONFIG =================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL = os.getenv("DATABASE_URL")
 LOGGER_GROUP_ID = int(os.getenv("LOGGER_GROUP_ID", "0"))
 
-START_IMAGE = "https://files.catbox.moe/vg3vae.jpg"
-STATE_KEY = "promo_state"
+if not BOT_TOKEN or not DATABASE_URL or not OWNER_ID:
+    raise RuntimeError(
+        "BOT_TOKEN, OWNER_ID and DATABASE_URL must be configured."
+    )
+
+
+# ================= LOGGING =================
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+
+logger = logging.getLogger(__name__)
+
+db = None
 
 DURATIONS = {
-    "5min": ("5 Minutes (Test)", 5 / 60),
     "24": ("24 Hours", 24),
     "48": ("48 Hours", 48),
     "72": ("72 Hours", 72),
     "permanent": ("Permanent", None),
 }
 
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
 
-logger = logging.getLogger(__name__)
+# ================= DATABASE =================
 
+async def init_db():
+    global db
 
-# =============== DATABASE ===============
-
-async def init_db(app):
-    pool = await asyncpg.create_pool(
+    db = await asyncpg.create_pool(
         DATABASE_URL,
-        ssl="require",
         min_size=1,
         max_size=5,
+        command_timeout=60,
     )
 
-    app.bot_data["db"] = pool
-
-    async with pool.acquire() as conn:
-
+    async with db.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS zx_promo_admins (
                 user_id BIGINT PRIMARY KEY,
-                added_by BIGINT NOT NULL,
                 added_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
@@ -75,22 +78,22 @@ async def init_db(app):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS zx_promo_destinations (
                 chat_id BIGINT PRIMARY KEY,
-                title TEXT NOT NULL,
-                added_by BIGINT NOT NULL,
+                chat_title TEXT,
+                chat_link TEXT,
                 added_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS zx_promo_messages (
-                id BIGSERIAL PRIMARY KEY,
-                source_user_id BIGINT NOT NULL,
-                destination_chat_id BIGINT NOT NULL,
-                destination_message_id BIGINT NOT NULL,
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL,
                 expires_at TIMESTAMPTZ,
-                status TEXT NOT NULL DEFAULT 'active',
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                UNIQUE(destination_chat_id, destination_message_id)
+                deleted BOOLEAN DEFAULT FALSE,
+                delete_attempts INTEGER DEFAULT 0,
+                last_delete_error TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
@@ -105,620 +108,395 @@ async def init_db(app):
         """)
 
         await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_zx_promo_expiry
+            CREATE INDEX IF NOT EXISTS
+            zx_promo_messages_expiry_idx
             ON zx_promo_messages (expires_at)
-            WHERE status = 'active'
+            WHERE deleted = FALSE
         """)
 
-    logger.info("Database ready")
+    logger.info("DATABASE CONNECTED")
 
 
-async def get_pool(app):
-    return app.bot_data["db"]
+# ================= LOGGER =================
 
-
-async def shutdown(app):
-    pool = app.bot_data.get("db")
-
-    if pool:
-        await pool.close()
-        logger.info("Database connection closed")
-
-
-# =============== LOGGER ===============
-
-async def send_logger(context, text):
+async def send_log(context, message):
     if not LOGGER_GROUP_ID:
         return
 
     try:
         await context.bot.send_message(
             chat_id=LOGGER_GROUP_ID,
-            text=text,
-            parse_mode="HTML",
+            text=message,
+            parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
-    except TelegramError as exc:
-        logger.warning("Logger message failed: %s", exc)
+    except Exception:
+        logger.exception("LOGGER GROUP MESSAGE FAILED")
 
 
-async def get_chat_link(bot, chat):
-    if chat.username:
-        return f"https://t.me/{chat.username}"
-
-    return "Private chat (invite link unavailable)"
-
-
-async def log_chat_event(update, context):
-    chat = update.effective_chat
-    member_update = update.my_chat_member
-
-    if not chat or not member_update:
-        return
-
-    if chat.type not in ("group", "supergroup", "channel"):
-        return
-
-    old_status = member_update.old_chat_member.status
-    new_status = member_update.new_chat_member.status
-
-    was_present = old_status in (
-        ChatMemberStatus.MEMBER,
-        ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.RESTRICTED,
+async def log_chat_event(context, title, chat_id, chat_title, chat_link):
+    await send_log(
+        context,
+        (
+            f"<b>{escape(title)}</b>\n\n"
+            f"Name: {escape(str(chat_title))}\n"
+            f"Chat ID: <code>{chat_id}</code>\n"
+            f"Link: {escape(str(chat_link or 'Private'))}"
+        ),
     )
 
-    is_present = new_status in (
-        ChatMemberStatus.MEMBER,
-        ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.RESTRICTED,
-    )
 
-    became_admin = (
-        old_status != ChatMemberStatus.ADMINISTRATOR
-        and new_status == ChatMemberStatus.ADMINISTRATOR
-    )
+# ================= ACCESS CONTROL =================
 
-    if not is_present or (was_present and not became_admin):
-        return
-
-    actor = member_update.from_user
-    link = await get_chat_link(context.bot, chat)
-
-    actor_name = escape(actor.full_name or "Unknown")
-
-    actor_username = (
-        f"@{escape(actor.username)}"
-        if actor.username
-        else "Not available"
-    )
-
-    text = (
-        "🚨 <b>BOT ADDED / UPDATED IN CHAT</b>\n\n"
-        f"📛 <b>Name:</b> {escape(chat.title or 'Unknown')}\n"
-        f"🆔 <b>Chat ID:</b> <code>{chat.id}</code>\n"
-        f"📂 <b>Type:</b> {escape(chat.type)}\n"
-        f"🔗 <b>Link:</b> {escape(link)}\n\n"
-        f"👤 <b>Changed by:</b> {actor_name}\n"
-        f"🔖 <b>Username:</b> {actor_username}\n"
-        f"🆔 <b>User ID:</b> <code>{actor.id}</code>"
-    )
-
-    await send_logger(context, text)
-
-
-# =============== ACCESS CONTROL ===============
-
-async def is_authorized(app, user_id):
+async def is_admin(user_id):
     if user_id == OWNER_ID:
         return True
 
-    pool = await get_pool(app)
-
-    async with pool.acquire() as conn:
+    async with db.acquire() as conn:
         result = await conn.fetchval(
-            """
-            SELECT 1
-            FROM zx_promo_admins
-            WHERE user_id=$1
-            """,
+            "SELECT 1 FROM zx_promo_admins WHERE user_id = $1",
             user_id,
         )
 
-    return result is not None
+    return bool(result)
 
 
 async def owner_only(update):
-    if (
-        not update.effective_user
-        or update.effective_user.id != OWNER_ID
-    ):
-        if update.effective_message:
-            await update.effective_message.reply_text(
-                "❌ Owner only command."
-            )
-        return False
-
-    return True
-
-
-async def authorized_only(update, context):
-    if (
-        not update.effective_user
-        or not await is_authorized(
-            context.application,
-            update.effective_user.id,
-        )
-    ):
-        if update.effective_message:
-            await update.effective_message.reply_text(
-                "❌ You are not authorized to use this bot."
-            )
-        return False
-
-    return True
-
-
-# =============== START / HELP ===============
-
-async def start(update, context):
-    caption = (
-        "<b>🚀 PROMO MANAGER</b>\n\n"
-        "<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
-        "<b>• Promote Everywhere. Reach More.</b>\n\n"
-        "<b>• Fast • Reliable • Automated</b>\n\n"
-        "<b>• Type /help for commands</b>\n\n"
-        "<b>• Powered by @SumitTripathi</b>\n\n"
-        "<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>"
-    )
-
-    try:
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=START_IMAGE,
-            caption=caption,
-            parse_mode="HTML",
-        )
-
-    except TelegramError as exc:
-        logger.warning("Start image failed: %s", exc)
-
+    if update.effective_user.id != OWNER_ID:
         await update.effective_message.reply_text(
-            caption,
-            parse_mode="HTML",
+            "❌ This command is only for the bot owner."
         )
+        return False
+
+    return True
 
 
-async def help_command(update, context):
+# ================= START =================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "<b>🚀 PROMO MANAGER — HELP</b>\n\n"
-        "<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
-        "<b>📢 PROMO COMMANDS</b>\n"
-        "<b>/promo</b> — Start a promotion\n"
-        "<b>/cancel</b> — Cancel current promotion\n"
+        "🚀 <b>PROMO MANAGER</b>\n"
+        "◆━━━━━━━━━▣✦▣━━━━━━━━━◆\n\n"
+        "Promote Everywhere. Reach More.\n\n"
+        "Fast • Reliable • Automated\n\n"
+        "Type /help for commands\n\n"
+        "Powered by @SumitTripathi"
     )
 
-    if (
-        update.effective_user
-        and update.effective_user.id == OWNER_ID
-    ):
-        text += (
-            "\n<b>👑 OWNER COMMANDS</b>\n"
-            "<b>/auth USER_ID</b> — Authorize admin\n"
-            "<b>/unauth USER_ID</b> — Remove admin\n"
-            "<b>/admins</b> — View authorized admins\n\n"
-            "<b>📡 DESTINATION COMMANDS</b>\n"
-            "<b>/connect CHAT_ID</b> — Connect group/channel\n"
-            "<b>/destinations</b> — View connected destinations\n"
-            "<b>/disconnect CHAT_ID</b> — Remove destination\n"
-        )
-
-    text += (
-        "\n<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
-        "<b>👑 Powered by @SumitTripathi</b>"
-    )
-
-    await update.effective_message.reply_text(
+    await update.message.reply_text(
         text,
-        parse_mode="HTML",
+        parse_mode=ParseMode.HTML,
     )
 
 
-# =============== ADMIN COMMANDS ===============
+# ================= HELP =================
 
-async def auth_admin(update, context):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "<b>📚 PROMO MANAGER HELP</b>\n\n"
+        "<b>Promo Commands</b>\n"
+        "/promo - Send a new promotion\n"
+        "/cancel - Cancel current operation\n\n"
+        "<b>Owner Commands</b>\n"
+        "/auth - Add an admin\n"
+        "/unauth - Remove an admin\n"
+        "/admins - List admins\n"
+        "/connect - Connect a group/channel\n"
+        "/destinations - List connected chats\n"
+        "/disconnect - Disconnect a chat\n\n"
+        "<b>Duration Options</b>\n"
+        "24 Hours\n"
+        "48 Hours\n"
+        "72 Hours\n"
+        "Permanent\n\n"
+        "Powered by @SumitTripathi"
+    )
+
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# ================= AUTH =================
+
+async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
         return
 
     if not context.args:
-        await update.effective_message.reply_text(
+        await update.message.reply_text(
             "Usage: /auth USER_ID"
         )
         return
 
     try:
         user_id = int(context.args[0])
-
-        if user_id <= 0 or user_id == OWNER_ID:
-            raise ValueError
-
     except ValueError:
-        await update.effective_message.reply_text(
-            "❌ Invalid user ID."
-        )
+        await update.message.reply_text("Invalid user ID.")
         return
 
-    pool = await get_pool(context.application)
-
-    async with pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO zx_promo_admins (user_id, added_by)
-            VALUES ($1, $2)
+            INSERT INTO zx_promo_admins (user_id)
+            VALUES ($1)
             ON CONFLICT (user_id) DO NOTHING
             """,
             user_id,
-            update.effective_user.id,
         )
 
-    await update.effective_message.reply_text(
-        f"✅ Authorized: {user_id}"
+    await update.message.reply_text(
+        f"✅ Admin added: <code>{user_id}</code>",
+        parse_mode=ParseMode.HTML,
     )
 
 
-async def unauth_admin(update, context):
+async def unauth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
         return
 
     if not context.args:
-        await update.effective_message.reply_text(
+        await update.message.reply_text(
             "Usage: /unauth USER_ID"
         )
         return
 
     try:
         user_id = int(context.args[0])
-
     except ValueError:
-        await update.effective_message.reply_text(
-            "❌ Invalid user ID."
-        )
+        await update.message.reply_text("Invalid user ID.")
         return
 
-    if user_id == OWNER_ID:
-        await update.effective_message.reply_text(
-            "❌ Cannot remove the owner."
-        )
-        return
-
-    pool = await get_pool(context.application)
-
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            "DELETE FROM zx_promo_admins WHERE user_id=$1",
+    async with db.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM zx_promo_admins WHERE user_id = $1",
             user_id,
         )
 
-    await update.effective_message.reply_text(
-        "✅ Admin removed."
-        if result != "DELETE 0"
-        else "ℹ️ Admin not found."
+    await update.message.reply_text(
+        f"✅ Admin removed: <code>{user_id}</code>",
+        parse_mode=ParseMode.HTML,
     )
 
 
-async def list_admins(update, context):
+async def admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
         return
 
-    pool = await get_pool(context.application)
-
-    async with pool.acquire() as conn:
+    async with db.acquire() as conn:
         rows = await conn.fetch(
-            """
-            SELECT user_id
-            FROM zx_promo_admins
-            ORDER BY added_at
-            """
+            "SELECT user_id FROM zx_promo_admins ORDER BY user_id"
         )
 
-    text = "👑 <b>AUTHORIZED ADMINS</b>\n\n"
+    text = "<b>👮 ADMIN LIST</b>\n\n"
+    text += f"Owner: <code>{OWNER_ID}</code>\n"
 
-    if not rows:
-        text += "No additional admins."
-    else:
-        for row in rows:
-            text += f"• <code>{row['user_id']}</code>\n"
+    for row in rows:
+        text += f"• <code>{row['user_id']}</code>\n"
 
-    await update.effective_message.reply_text(
+    await update.message.reply_text(
         text,
-        parse_mode="HTML",
+        parse_mode=ParseMode.HTML,
     )
 
 
-# =============== DESTINATIONS ===============
+# ================= CONNECT =================
 
-async def bot_has_permissions(bot, chat_id):
-    try:
-        me = await bot.get_me()
-
-        member = await bot.get_chat_member(
-            chat_id,
-            me.id,
-        )
-
-        if member.status != ChatMemberStatus.ADMINISTRATOR:
-            return False
-
-        chat = await bot.get_chat(chat_id)
-
-        if chat.type == "channel":
-            return (
-                bool(member.can_post_messages)
-                and bool(member.can_delete_messages)
-            )
-
-        return bool(member.can_delete_messages)
-
-    except TelegramError as exc:
-        logger.warning(
-            "Permission check failed for %s: %s",
-            chat_id,
-            exc,
-        )
-        return False
-
-
-async def connect_destination(update, context):
+async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
         return
 
-    if not context.args:
-        await update.effective_message.reply_text(
-            "Usage: /connect CHAT_ID"
-        )
+    await update.message.reply_text(
+        "Add the bot to your group/channel and make it an admin.\n"
+        "Then send /connect in that group/channel."
+    )
+
+
+async def connect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+
+    if chat.type == "private":
         return
 
     try:
-        chat_id = int(context.args[0])
-        chat = await context.bot.get_chat(chat_id)
+        member = await context.bot.get_chat_member(
+            chat.id,
+            context.bot.id,
+        )
 
-        if chat.type not in ("group", "supergroup", "channel"):
-            raise ValueError(
-                "Only groups and channels are supported."
-            )
-
-        if not await bot_has_permissions(context.bot, chat_id):
-            await update.effective_message.reply_text(
-                "❌ Bot ko admin banao aur required permissions do.\n\n"
-                "Channel: Post Messages + Delete Messages\n"
-                "Group: Delete Messages"
+        if member.status not in ("administrator", "creator"):
+            await update.message.reply_text(
+                "❌ Please make the bot an administrator first."
             )
             return
 
-        pool = await get_pool(context.application)
+        invite_link = None
 
-        async with pool.acquire() as conn:
+        try:
+            invite_link = await context.bot.export_chat_invite_link(
+                chat.id
+            )
+        except TelegramError:
+            pass
+
+        async with db.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO zx_promo_destinations
-                    (chat_id, title, added_by)
+                (chat_id, chat_title, chat_link)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (chat_id)
-                DO UPDATE SET title=EXCLUDED.title
+                DO UPDATE SET
+                    chat_title = EXCLUDED.chat_title,
+                    chat_link = EXCLUDED.chat_link
                 """,
-                chat_id,
-                chat.title or str(chat_id),
-                update.effective_user.id,
+                chat.id,
+                chat.title or "Unknown",
+                invite_link,
             )
 
-        await update.effective_message.reply_text(
-            f"✅ Connected: {escape(chat.title or str(chat_id))}",
-            parse_mode="HTML",
+        await update.message.reply_text(
+            "✅ This chat has been connected successfully."
         )
 
-        link = await get_chat_link(context.bot, chat)
-
-        await send_logger(
+        await log_chat_event(
             context,
-            (
-                "📡 <b>DESTINATION CONNECTED</b>\n\n"
-                f"📛 <b>Name:</b> {escape(chat.title or 'Unknown')}\n"
-                f"🆔 <b>Chat ID:</b> <code>{chat.id}</code>\n"
-                f"📂 <b>Type:</b> {escape(chat.type)}\n"
-                f"🔗 <b>Link:</b> {escape(link)}\n"
-                f"👤 <b>Connected by:</b> "
-                f"<code>{update.effective_user.id}</code>"
-            ),
+            "NEW DESTINATION CONNECTED",
+            chat.id,
+            chat.title or "Unknown",
+            invite_link,
         )
 
-    except ValueError as exc:
-        await update.effective_message.reply_text(
-            f"❌ {escape(str(exc))}",
-            parse_mode="HTML",
-        )
-
-    except TelegramError as exc:
-        logger.warning("Connect failed: %s", exc)
-        await update.effective_message.reply_text(
-            "❌ Chat nahi mila. ID aur bot permissions check karo."
+    except Exception:
+        logger.exception("CONNECT FAILED")
+        await update.message.reply_text(
+            "❌ Could not connect this chat."
         )
 
 
-async def list_destinations(update, context):
+# ================= DESTINATIONS =================
+
+async def destinations(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     if not await owner_only(update):
         return
 
-    pool = await get_pool(context.application)
-
-    async with pool.acquire() as conn:
+    async with db.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT chat_id, title
+            SELECT chat_id, chat_title, chat_link
             FROM zx_promo_destinations
-            ORDER BY added_at
+            ORDER BY added_at DESC
             """
         )
 
     if not rows:
-        await update.effective_message.reply_text(
+        await update.message.reply_text(
             "No destinations connected."
         )
         return
 
-    text = "📡 <b>CONNECTED DESTINATIONS</b>\n\n"
+    text = "<b>📢 CONNECTED DESTINATIONS</b>\n\n"
 
     for row in rows:
         text += (
-            f"• {escape(row['title'])}\n"
-            f"<code>{row['chat_id']}</code>\n\n"
+            f"<b>{escape(row['chat_title'] or 'Unknown')}</b>\n"
+            f"ID: <code>{row['chat_id']}</code>\n"
+            f"Link: {escape(row['chat_link'] or 'Private')}\n\n"
         )
 
-    await update.effective_message.reply_text(
+    await update.message.reply_text(
         text,
-        parse_mode="HTML",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
     )
 
 
-async def disconnect_destination(update, context):
+# ================= DISCONNECT =================
+
+async def disconnect(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     if not await owner_only(update):
         return
 
     if not context.args:
-        await update.effective_message.reply_text(
+        await update.message.reply_text(
             "Usage: /disconnect CHAT_ID"
         )
         return
 
     try:
         chat_id = int(context.args[0])
-
     except ValueError:
-        await update.effective_message.reply_text(
-            "❌ Invalid chat ID."
-        )
+        await update.message.reply_text("Invalid chat ID.")
         return
 
-    pool = await get_pool(context.application)
-
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT title
-            FROM zx_promo_destinations
-            WHERE chat_id=$1
-            """,
-            chat_id,
-        )
-
+    async with db.acquire() as conn:
         result = await conn.execute(
             """
             DELETE FROM zx_promo_destinations
-            WHERE chat_id=$1
+            WHERE chat_id = $1
             """,
             chat_id,
         )
 
-    await update.effective_message.reply_text(
-        "✅ Destination disconnected."
-        if result != "DELETE 0"
-        else "ℹ️ Destination not found."
-    )
-
-    if row:
-        await send_logger(
-            context,
-            (
-                "🔌 <b>DESTINATION DISCONNECTED</b>\n\n"
-                f"📛 <b>Name:</b> {escape(row['title'])}\n"
-                f"🆔 <b>Chat ID:</b> <code>{chat_id}</code>\n"
-                f"👤 <b>Disconnected by:</b> "
-                f"<code>{update.effective_user.id}</code>"
-            ),
+    if result == "DELETE 0":
+        await update.message.reply_text(
+            "This destination was not found."
         )
-
-
-# =============== PROMO ===============
-
-async def promo(update, context):
-    if not await authorized_only(update, context):
         return
 
-    context.user_data[STATE_KEY] = {
-        "step": "message",
-    }
+    await update.message.reply_text(
+        f"✅ Disconnected: <code>{chat_id}</code>",
+        parse_mode=ParseMode.HTML,
+    )
 
-    await update.effective_message.reply_text(
-        "📢 Promo message bhejo.\n\n"
-        "• Normal text normally publish hoga.\n"
-        "• Channel se forwarded message ka attribution preserve hoga.\n"
-        "• Photo, video aur caption bhi supported hain.\n\n"
-        "Cancel karne ke liye /cancel bhejo."
+    await send_log(
+        context,
+        f"❌ <b>DESTINATION DISCONNECTED</b>\n"
+        f"Chat ID: <code>{chat_id}</code>",
     )
 
 
-async def cancel_promo(update, context):
-    if context.user_data.pop(STATE_KEY, None):
-        await update.effective_message.reply_text(
-            "❌ Promo cancelled."
+# ================= PROMO =================
+
+async def promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id):
+        await update.message.reply_text(
+            "❌ You are not authorized to use this command."
         )
-    else:
-        await update.effective_message.reply_text(
-            "Koi active promo process nahi hai."
-        )
+        return
+
+    context.user_data["promo_state"] = "waiting_message"
+
+    await update.message.reply_text(
+        "📩 Send the promotion message now.\n\n"
+        "You can send text, photo, video or a forwarded message.\n"
+        "Use /cancel to stop."
+    )
 
 
-async def receive_promo(update, context):
+async def receive_promo(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if context.user_data.get("promo_state") != "waiting_message":
+        return
+
     message = update.effective_message
-    user = update.effective_user
 
-    if not message or not user:
+    if message.text and message.text.startswith("/"):
         return
 
-    state = context.user_data.get(STATE_KEY)
-
-    if not state or state.get("step") != "message":
-        return
-
-    if not await is_authorized(context.application, user.id):
-        context.user_data.pop(STATE_KEY, None)
-        return
-
-    if message.has_protected_content:
-        await message.reply_text(
-            "❌ Protected content forward nahi ho sakta."
-        )
-        return
-
-    if not (
-        message.text
-        or message.photo
-        or message.video
-        or message.animation
-        or message.document
-        or message.audio
-        or message.voice
-        or message.video_note
-        or message.sticker
-    ):
-        await message.reply_text(
-            "❌ Is message type ko support nahi kiya gaya."
-        )
-        return
-
-    state["source_chat_id"] = message.chat_id
-    state["source_message_id"] = message.message_id
-    state["source_is_forwarded"] = (
-        message.forward_origin is not None
-    )
-    state["step"] = "duration"
+    context.user_data["promo_message"] = message
+    context.user_data["promo_state"] = "waiting_duration"
 
     keyboard = [
-        [
-            InlineKeyboardButton(
-                "⚡ 5 Minutes (Test)",
-                callback_data="duration:5min",
-            ),
-        ],
         [
             InlineKeyboardButton(
                 "24 Hours",
@@ -748,135 +526,89 @@ async def receive_promo(update, context):
     ]
 
     await message.reply_text(
-        "⏳ Promo duration select karo:",
+        "⏳ Select promotion duration:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-async def publish_message(
-    context,
-    source_chat_id,
-    source_message_id,
-    destination_chat_id,
-    is_forwarded,
+async def duration_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
 ):
-    if is_forwarded:
-        return await context.bot.forward_message(
-            chat_id=destination_chat_id,
-            from_chat_id=source_chat_id,
-            message_id=source_message_id,
-        )
-
-    return await context.bot.copy_message(
-        chat_id=destination_chat_id,
-        from_chat_id=source_chat_id,
-        message_id=source_message_id,
-    )
-
-
-async def choose_duration(update, context):
     query = update.callback_query
     await query.answer()
 
-    if not await is_authorized(
-        context.application,
-        query.from_user.id,
-    ):
-        await query.edit_message_text("❌ Unauthorized.")
-        return
+    data = query.data.split(":", 1)[1]
 
-    state = context.user_data.get(STATE_KEY)
-
-    if not state or state.get("step") != "duration":
+    if data == "cancel":
+        context.user_data.clear()
         await query.edit_message_text(
-            "⚠️ Session expired. /promo dobara bhejo."
+            "❌ Promotion cancelled."
         )
         return
 
-    choice = query.data.split(":", 1)[1]
-
-    if choice == "cancel":
-        context.user_data.pop(STATE_KEY, None)
-        await query.edit_message_text("❌ Promo cancelled.")
+    if context.user_data.get("promo_state") != "waiting_duration":
+        await query.edit_message_text(
+            "This promo session has expired. Use /promo again."
+        )
         return
 
-    if choice not in DURATIONS:
-        await query.edit_message_text("❌ Invalid duration.")
+    if data not in DURATIONS:
+        await query.edit_message_text(
+            "Invalid duration selected."
+        )
         return
 
-    duration_name, hours = DURATIONS[choice]
+    promo_message = context.user_data.get("promo_message")
 
-    expires_at = (
-        datetime.now(timezone.utc) + timedelta(hours=hours)
-        if hours is not None
-        else None
-    )
+    if not promo_message:
+        context.user_data.clear()
+        await query.edit_message_text(
+            "Promo message not found. Use /promo again."
+        )
+        return
 
-    pool = await get_pool(context.application)
+    label, hours = DURATIONS[data]
 
-    async with pool.acquire() as conn:
-        destinations = await conn.fetch(
-            """
-            SELECT chat_id, title
-            FROM zx_promo_destinations
-            ORDER BY added_at
-            """
+    expires_at = None
+
+    if hours is not None:
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            hours=hours
         )
 
-    if not destinations:
-        context.user_data.pop(STATE_KEY, None)
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT chat_id, chat_title FROM zx_promo_destinations"
+        )
+
+    if not rows:
+        context.user_data.clear()
         await query.edit_message_text(
-            "❌ Koi destination connected nahi hai."
+            "❌ No connected destinations found."
         )
         return
 
     await query.edit_message_text(
-        f"⏳ Publishing...\nDuration: {duration_name}"
+        f"📤 Publishing promotion...\nDuration: {label}"
     )
 
     success = 0
-    failed = []
+    failed = 0
 
-    source_chat_id = state["source_chat_id"]
-    source_message_id = state["source_message_id"]
-    is_forwarded = state["source_is_forwarded"]
-
-    for destination in destinations:
-        chat_id = destination["chat_id"]
-        title = destination["title"]
+    for row in rows:
+        chat_id = row["chat_id"]
 
         try:
-            if not await bot_has_permissions(context.bot, chat_id):
-                failed.append(f"{title}: missing permissions")
-                continue
+            sent = await promo_message.copy(chat_id=chat_id)
 
-            sent = await publish_message(
-                context,
-                source_chat_id,
-                source_message_id,
-                chat_id,
-                is_forwarded,
-            )
-
-            async with pool.acquire() as conn:
+            async with db.acquire() as conn:
                 await conn.execute(
                     """
                     INSERT INTO zx_promo_messages
-                    (
-                        source_user_id,
-                        destination_chat_id,
-                        destination_message_id,
-                        expires_at,
-                        status
-                    )
-                    VALUES ($1, $2, $3, $4, 'active')
-                    ON CONFLICT (
-                        destination_chat_id,
-                        destination_message_id
-                    )
-                    DO NOTHING
+                    (chat_id, message_id, expires_at)
+                    VALUES ($1, $2, $3)
                     """,
-                    query.from_user.id,
                     chat_id,
                     sent.message_id,
                     expires_at,
@@ -884,72 +616,60 @@ async def choose_duration(update, context):
 
             success += 1
 
-        except (TelegramError, asyncpg.PostgresError) as exc:
+        except Exception:
+            failed += 1
             logger.exception(
-                "Publishing to %s failed",
+                "PROMO SEND FAILED FOR CHAT %s",
                 chat_id,
             )
-            failed.append(f"{title}: {str(exc)[:100]}")
 
-        await asyncio.sleep(0.1)
+    context.user_data.clear()
 
-    context.user_data.pop(STATE_KEY, None)
-
-    report = (
-        "📢 <b>PROMO REPORT</b>\n\n"
-        f"✅ Published: {success}\n"
-        f"❌ Failed: {len(failed)}\n"
-        f"⏳ Duration: {duration_name}\n"
+    await query.message.reply_text(
+        "✅ <b>PROMO PUBLISHED</b>\n\n"
+        f"Duration: {escape(label)}\n"
+        f"Successful: {success}\n"
+        f"Failed: {failed}\n\n"
+        "Powered by @SumitTripathi",
+        parse_mode=ParseMode.HTML,
     )
 
-    if expires_at:
-        report += (
-            f"🗓 Expires: "
-            f"{expires_at.strftime('%d-%m-%Y %H:%M UTC')}\n"
-        )
-    else:
-        report += "♾ Auto-delete: Off\n"
-
-    if failed:
-        report += "\n<b>Failed destinations:</b>\n"
-
-        for item in failed[:15]:
-            report += f"• {escape(item)}\n"
-
-        if len(failed) > 15:
-            report += f"• ...and {len(failed) - 15} more\n"
-
-    try:
-        await context.bot.send_message(
-            chat_id=query.from_user.id,
-            text=report,
-            parse_mode="HTML",
-        )
-    except TelegramError:
-        logger.exception("Could not send promo report")
+    await send_log(
+        context,
+        (
+            "📢 <b>PROMO PUBLISHED</b>\n\n"
+            f"Duration: {escape(label)}\n"
+            f"Successful: {success}\n"
+            f"Failed: {failed}\n"
+            f"By: <code>{update.effective_user.id}</code>"
+        ),
+    )
 
 
-# =============== AUTO DELETE ===============
+# ================= CANCEL =================
 
-async def delete_expired_promos(context):
-    pool = context.application.bot_data.get("db")
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
 
-    if not pool:
-        logger.error("AUTO DELETE: Database pool unavailable")
-        return
+    await update.message.reply_text(
+        "❌ Current operation cancelled."
+    )
 
+
+# ================= AUTO DELETE =================
+
+async def delete_expired_promos(
+    context: ContextTypes.DEFAULT_TYPE,
+):
     logger.info("AUTO DELETE JOB RUNNING")
 
     try:
-        async with pool.acquire() as conn:
+        async with db.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT
-                    id,
-                    destination_chat_id,
-                    destination_message_id
+                SELECT id, chat_id, message_id, delete_attempts
                 FROM zx_promo_messages
-                WHERE status = 'active'
+                WHERE deleted = FALSE
                   AND expires_at IS NOT NULL
                   AND expires_at <= NOW()
                 ORDER BY expires_at ASC
@@ -958,18 +678,13 @@ async def delete_expired_promos(context):
             )
 
         if not rows:
-            logger.info("AUTO DELETE: No expired promos found")
+            logger.info("NO EXPIRED PROMOS FOUND")
             return
-
-        logger.info(
-            "AUTO DELETE: Found %s expired messages",
-            len(rows),
-        )
 
         for row in rows:
             promo_id = row["id"]
-            chat_id = row["destination_chat_id"]
-            message_id = row["destination_message_id"]
+            chat_id = row["chat_id"]
+            message_id = row["message_id"]
 
             try:
                 await context.bot.delete_message(
@@ -977,11 +692,11 @@ async def delete_expired_promos(context):
                     message_id=message_id,
                 )
 
-                async with pool.acquire() as conn:
+                async with db.acquire() as conn:
                     await conn.execute(
                         """
                         UPDATE zx_promo_messages
-                        SET status = 'deleted',
+                        SET deleted = TRUE,
                             last_delete_error = NULL
                         WHERE id = $1
                         """,
@@ -989,20 +704,22 @@ async def delete_expired_promos(context):
                     )
 
                 logger.info(
-                    "AUTO DELETE SUCCESS: chat=%s message=%s",
-                    chat_id,
-                    message_id,
+                    "AUTO DELETE SUCCESS: %s",
+                    promo_id,
                 )
 
-            except BadRequest as exc:
-                error_text = str(exc)
+            except BadRequest as e:
+                error_text = str(e)
 
-                if "message to delete not found" in error_text.lower():
-                    async with pool.acquire() as conn:
+                if (
+                    "message to delete not found" in error_text.lower()
+                    or "message_id_invalid" in error_text.lower()
+                ):
+                    async with db.acquire() as conn:
                         await conn.execute(
                             """
                             UPDATE zx_promo_messages
-                            SET status = 'deleted',
+                            SET deleted = TRUE,
                                 last_delete_error = NULL
                             WHERE id = $1
                             """,
@@ -1010,171 +727,127 @@ async def delete_expired_promos(context):
                         )
 
                     logger.info(
-                        "AUTO DELETE: Message already deleted: %s",
-                        message_id,
+                        "MESSAGE ALREADY DELETED: %s",
+                        promo_id,
                     )
 
                 else:
-                    async with pool.acquire() as conn:
+                    async with db.acquire() as conn:
                         await conn.execute(
                             """
                             UPDATE zx_promo_messages
-                            SET delete_attempts =
-                                    COALESCE(delete_attempts, 0) + 1,
-                                last_delete_error = $1
-                            WHERE id = $2
+                            SET delete_attempts = delete_attempts + 1,
+                                last_delete_error = $2
+                            WHERE id = $1
                             """,
-                            error_text[:1000],
                             promo_id,
+                            error_text[:1000],
                         )
 
                     logger.error(
-                        "AUTO DELETE FAILED: chat=%s message=%s error=%s",
-                        chat_id,
-                        message_id,
+                        "AUTO DELETE FAILED: %s - %s",
+                        promo_id,
                         error_text,
                     )
 
-            except TelegramError as exc:
-                async with pool.acquire() as conn:
+            except TelegramError as e:
+                async with db.acquire() as conn:
                     await conn.execute(
                         """
                         UPDATE zx_promo_messages
-                        SET delete_attempts =
-                                COALESCE(delete_attempts, 0) + 1,
-                            last_delete_error = $1
-                        WHERE id = $2
+                        SET delete_attempts = delete_attempts + 1,
+                            last_delete_error = $2
+                        WHERE id = $1
                         """,
-                        str(exc)[:1000],
                         promo_id,
+                        str(e)[:1000],
                     )
 
                 logger.error(
-                    "TELEGRAM DELETE ERROR: chat=%s message=%s error=%s",
-                    chat_id,
-                    message_id,
-                    exc,
-                )
-
-            except Exception as exc:
-                logger.exception(
-                    "UNEXPECTED DELETE ERROR: promo_id=%s",
+                    "AUTO DELETE TELEGRAM ERROR: %s - %s",
                     promo_id,
+                    e,
                 )
 
-                try:
-                    async with pool.acquire() as conn:
-                        await conn.execute(
-                            """
-                            UPDATE zx_promo_messages
-                            SET delete_attempts =
-                                    COALESCE(delete_attempts, 0) + 1,
-                                last_delete_error = $1
-                            WHERE id = $2
-                            """,
-                            str(exc)[:1000],
-                            promo_id,
-                        )
-                except Exception:
-                    logger.exception(
-                        "Could not save delete error for promo %s",
+            except Exception as e:
+                async with db.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE zx_promo_messages
+                        SET delete_attempts = delete_attempts + 1,
+                            last_delete_error = $2
+                        WHERE id = $1
+                        """,
                         promo_id,
+                        str(e)[:1000],
                     )
 
-            await asyncio.sleep(0.1)
+                logger.exception(
+                    "AUTO DELETE UNKNOWN ERROR: %s",
+                    promo_id,
+                )
 
     except Exception:
         logger.exception("AUTO DELETE JOB ERROR")
 
 
-# =============== ERRORS ===============
+# ================= POST INIT =================
 
-async def error_handler(update, context):
-    logger.error(
-        "Unhandled exception",
-        exc_info=context.error,
-    )
+async def post_init(application: Application):
+    await init_db()
 
-
-# =============== STARTUP ===============
-
-async def post_init(app):
-    await init_db(app)
-
-    if app.job_queue is None:
-        raise RuntimeError(
-            "JobQueue unavailable. Install "
-            "python-telegram-bot[job-queue]==21.10"
-        )
-
-    app.job_queue.run_repeating(
+    application.job_queue.run_repeating(
         delete_expired_promos,
         interval=30,
         first=10,
-        name="delete_expired_promos",
+        name="auto_delete_promos",
     )
 
     logger.info("AUTO DELETE JOB STARTED")
 
 
+# ================= MAIN =================
+
 def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN missing in Config Vars")
-
-    if not OWNER_ID:
-        raise RuntimeError("OWNER_ID missing in Config Vars")
-
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL missing in Config Vars")
-
-    app = (
+    application = (
         Application.builder()
         .token(BOT_TOKEN)
         .post_init(post_init)
-        .post_shutdown(shutdown)
         .build()
     )
 
-    app.add_handler(
-        ChatMemberHandler(
-            log_chat_event,
-            ChatMemberHandler.MY_CHAT_MEMBER,
-        )
-    )
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("promo", promo))
-    app.add_handler(CommandHandler("cancel", cancel_promo))
+    application.add_handler(CommandHandler("auth", auth))
+    application.add_handler(CommandHandler("unauth", unauth))
+    application.add_handler(CommandHandler("admins", admins))
 
-    app.add_handler(CommandHandler("auth", auth_admin))
-    app.add_handler(CommandHandler("unauth", unauth_admin))
-    app.add_handler(CommandHandler("admins", list_admins))
+    application.add_handler(CommandHandler("connect", connect))
+    application.add_handler(CommandHandler("destinations", destinations))
+    application.add_handler(CommandHandler("disconnect", disconnect))
 
-    app.add_handler(CommandHandler("connect", connect_destination))
-    app.add_handler(CommandHandler("destinations", list_destinations))
-    app.add_handler(CommandHandler("disconnect", disconnect_destination))
+    application.add_handler(CommandHandler("promo", promo))
+    application.add_handler(CommandHandler("cancel", cancel))
 
-    app.add_handler(
+    application.add_handler(
         CallbackQueryHandler(
-            choose_duration,
+            duration_callback,
             pattern=r"^duration:",
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         MessageHandler(
             filters.ALL & ~filters.COMMAND,
             receive_promo,
         )
     )
 
-    app.add_error_handler(error_handler)
+    logger.info("PROMO MANAGER STARTED")
 
-    logger.info("Promo Manager started")
-
-    app.run_polling(
-        allowed_updates=Update.ALL_TYPES
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
     )
 
 
