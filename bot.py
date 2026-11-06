@@ -297,7 +297,7 @@ async def start(update, context):
         "<b>• Promote Everywhere. Reach More.</b>\n\n"
         "<b>• Fast • Reliable • Automated</b>\n\n"
         "<b>• Type /help for commands</b>\n\n"
-        "<b>• Powered by @SumitTripathi</b>\n\n"
+        "<b>• Powered by @HeySumit</b>\n\n"
         "<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>"
     )
 
@@ -344,7 +344,7 @@ async def help_command(update, context):
 
     text += (
         "\n<b>◆━━━━━━━━━▣✦▣━━━━━━━━━◆</b>\n\n"
-        "<b>👑 Powered by @SumitTripathi</b>"
+        "<b>👑 Powered by @HeySumit</b>"
     )
 
     await update.effective_message.reply_text(
